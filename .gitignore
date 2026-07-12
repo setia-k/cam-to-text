@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.xlsx
+*.log
+
+# PaddleOCR model cache (auto-downloaded, don't need to version it)
+.paddlex/
+paddlex/
