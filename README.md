@@ -81,3 +81,6 @@ Both implement the same `OCREngine` interface, so nothing else changes.
   cause a stale lock briefly after moving the box
 - Box position isn't saved between sessions — redrawing is manual each time
   you switch operator/voucher format
+
+## scrpcpy commands
+`scrcpy --video-source=camera --camera-id=0 --camera-size=720x720 --camera-fps=30 -b 10M --no-audio`
