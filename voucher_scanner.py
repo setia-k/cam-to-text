@@ -34,17 +34,27 @@ import cv2
 import numpy as np
 import pyperclip
 import keyboard
+import threading
 from collections import deque
 from ocr_tesseract import TesseractEngine
 from ocr_paddle import PaddleEngine
 
 
 class VoucherScanner:
+    # Named display formats: each is a list of segment lengths.
+    # "cw" -> xxx xxx xxxxxx   |   "if" -> xxxxx xxxxx xx
+    # Add more operators here as you encounter them — key is just a label.
+    FORMAT_PRESETS = {
+        "cw": [3, 3, 6],
+        "if": [5, 5, 2],
+        "op3": [4, 4, 6],  # rename/adjust as needed
+    }
+
     def __init__(self, ocr_engine, camera_index=0,
                  box_width=400, box_height=80,
                  zoom_step=0.1, zoom_min=1.0, zoom_max=4.0,
                  ocr_every_n_frames=2,
-                 capture_group_size=4, capture_delimiter="-",
+                 capture_delimiter="-",
                  info_bar_height=60,
                  confirm_streak=3, min_lock_digits=6,
                  insert_hotkey="\\"):
@@ -56,12 +66,30 @@ class VoucherScanner:
         self.zoom_min = zoom_min
         self.zoom_max = zoom_max
         self.ocr_every_n_frames = ocr_every_n_frames
-        self.capture_group_size = capture_group_size
         self.capture_delimiter = capture_delimiter
         self.info_bar_height = info_bar_height
         self.confirm_streak = confirm_streak      # consecutive matching reads to lock
         self.min_lock_digits = min_lock_digits     # ignore short/partial reads
         self.insert_hotkey = insert_hotkey         # global hotkey to insert + advance
+
+        # Display format state — cycle presets with 'f', or type a custom
+        # one with 't' (e.g. type "3,3,6" then Enter) without restarting
+        self.format_names = list(self.FORMAT_PRESETS.keys())
+        if "custom" not in self.FORMAT_PRESETS:
+            self.FORMAT_PRESETS["custom"] = list(self.FORMAT_PRESETS[self.format_names[0]])
+            self.format_names.append("custom")
+        self.format_index = 0
+        self.typing_format = False
+        self.typing_buffer = ""
+
+        # OCR pause — stops new OCR calls (the CPU-heavy part) while the
+        # video feed keeps running; toggled with 'p'
+        self.paused = False
+
+        # Insert direction: "down" -> Enter (move down a row, e.g. scanning
+        # 1 to 100), "up" -> Shift+Enter (move up a row, e.g. scanning back
+        # down from 100 to 1). Toggle with 'd'.
+        self.insert_direction = "down"
 
         # Mutable runtime state (previously module-level globals)
         self.box = None            # [x1, y1, x2, y2], set on first frame or drag
@@ -84,14 +112,30 @@ class VoucherScanner:
         self.cap = None
 
     def _format_display(self, digits):
-        """Groups raw digits with the configured delimiter for on-screen display
-        only. The underlying self.detected stays pure digits — this is purely
-        cosmetic and never affects what gets used elsewhere (e.g. Excel insert)."""
-        if not digits or self.capture_group_size <= 0:
+        """Groups raw digits according to the currently selected named
+        format's segment lengths (e.g. [3,3,6] -> xxx-xxx-xxxxxx) for
+        on-screen display only. self.detected / self.locked_value stay pure
+        digits — this is purely cosmetic and never affects what gets
+        copied or inserted elsewhere."""
+        if not digits:
             return digits
-        groups = [digits[i:i + self.capture_group_size]
-                  for i in range(0, len(digits), self.capture_group_size)]
+
+        sizes = self.FORMAT_PRESETS[self.format_names[self.format_index]]
+
+        groups = []
+        i = 0
+        for size in sizes:
+            if i >= len(digits):
+                break
+            groups.append(digits[i:i + size])
+            i += size
+        if i < len(digits):
+            groups.append(digits[i:])  # leftover digits beyond the pattern
+
         return self.capture_delimiter.join(groups)
+
+    def _cycle_format(self):
+        self.format_index = (self.format_index + 1) % len(self.format_names)
 
     # ---- mouse handling ----------------------------------------------
     def _mouse_callback(self, event, x, y, flags, param):
@@ -125,17 +169,23 @@ class VoucherScanner:
         return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
 
     def _insert_and_advance(self):
-        """Called from the `keyboard` library's global hook — runs regardless
-        of which window has focus (Excel, browser, etc). Types the raw
-        digits into whatever field is currently focused, presses Enter to
-        advance to the next cell, then resets the lock so the same voucher
-        can't be double-inserted by an accidental second press."""
+        """Called from the `keyboard` library's global hook — must return
+        FAST. Windows times out slow hook callbacks and lets the original
+        keystroke through unsuppressed, which is what caused leaks on a
+        slower PC. So this just kicks off a thread and returns immediately;
+        the actual typing happens in _do_insert below."""
         if not self.locked_value:
             return
-        keyboard.write(self.locked_value)
-        keyboard.send('enter')
-        self._last_inserted = self.locked_value
+        threading.Thread(target=self._do_insert, args=(self.locked_value,),
+                          daemon=True).start()
 
+    def _do_insert(self, value):
+        keyboard.write(value)
+        if self.insert_direction == "down":
+            keyboard.send('enter')
+        else:
+            keyboard.send('shift+enter')
+        self._last_inserted = value
         self.locked = False
         self.history.clear()
 
@@ -175,7 +225,13 @@ class VoucherScanner:
         overlaid on top of the pixels) and stacks them with vconcat."""
         bar = np.zeros((self.info_bar_height, width, 3), dtype=np.uint8)
 
-        if self.locked:
+        if self.typing_format:
+            status_text = f"New format — type a preset name (cw/if) or pattern (3,3,6), Enter=apply, Esc=cancel: {self.typing_buffer}"
+            status_color = (255, 255, 255)
+        elif self.paused:
+            status_text = "PAUSED (press p to resume) — last locked value still usable"
+            status_color = (0, 165, 255)
+        elif self.locked:
             copied_flag = " (copied)" if self.locked_value == self._last_copied else ""
             status_text = f"LOCKED: {self._format_display(self.locked_value)}{copied_flag}"
             status_color = (0, 200, 0)
@@ -186,17 +242,38 @@ class VoucherScanner:
         cv2.putText(bar, status_text, (15, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
 
+        direction_arrow = ">" if self.insert_direction == "down" else "<"
         last_inserted_text = f"Last inserted: {self._format_display(self._last_inserted)}" \
             if self._last_inserted else "Last inserted: -"
+        last_inserted_text += f"   Dir [{direction_arrow}] (d to toggle)"
         cv2.putText(bar, last_inserted_text, (15, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.putText(bar, f"Zoom: {self.zoom:.1f}x", (width - 130, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.putText(bar, f"Format: {self.format_names[self.format_index]}", (width - 130, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
         return cv2.vconcat([frame, bar])
 
     def _handle_key(self, key):
         """Returns False if the app should quit."""
+        if key == 255 or key == -1:   # no key pressed this frame
+            return True
+
+        # --- typing mode: intercept everything until confirmed/cancelled ---
+        if self.typing_format:
+            if key == 13:  # Enter — confirm
+                self._apply_typed_format()
+                self.typing_format = False
+            elif key == 27:  # Esc — cancel
+                self.typing_format = False
+                self.typing_buffer = ""
+            elif key == 8:  # Backspace
+                self.typing_buffer = self.typing_buffer[:-1]
+            elif chr(key).isalnum() or chr(key) == ',':
+                self.typing_buffer += chr(key)
+            return True
+
         if key == ord('q'):
             return False
         elif key == ord('r'):
@@ -209,7 +286,43 @@ class VoucherScanner:
             if self.locked_value:
                 pyperclip.copy(self.locked_value)
                 self._last_copied = self.locked_value
+        elif key == ord('f'):
+            self._cycle_format()
+        elif key == ord('t'):
+            self.typing_format = True
+            self.typing_buffer = ""
+        elif key == ord('p'):
+            self.paused = not self.paused
+        elif key == ord('d'):
+            self.insert_direction = "up" if self.insert_direction == "down" else "down"
         return True
+
+    def _apply_typed_format(self):
+        """Two ways to use this:
+          - type a known preset name (e.g. 'cw', 'if') to switch to it directly
+          - type a numeric pattern (e.g. '3,3,6') to define a one-off format,
+            stored as the 'custom' preset and switched to immediately
+        No restart needed either way."""
+        text = self.typing_buffer.strip()
+        if not text:
+            return
+
+        # Named preset match (case-insensitive)
+        for name in self.format_names:
+            if name.lower() == text.lower():
+                self.format_index = self.format_names.index(name)
+                return
+
+        # Otherwise treat it as a numeric pattern
+        try:
+            sizes = [int(part) for part in text.split(",") if part.strip()]
+            if not sizes:
+                return
+        except ValueError:
+            return  # not a known name and not a valid numeric pattern — drop it
+
+        self.FORMAT_PRESETS["custom"] = sizes
+        self.format_index = self.format_names.index("custom")
 
     # ---- main loop ----------------------------------------------
     def run(self):
@@ -225,8 +338,10 @@ class VoucherScanner:
         # landing in whatever field is focused, before our inserted digits do
         keyboard.add_hotkey(self.insert_hotkey, self._insert_and_advance, suppress=True)
 
-        print("Controls: [r] = toggle rotate 180  |  [+/-] = zoom in/out  |  [c] = re-copy locked value  |  [q] = quit")
-        print(f"Global hotkey [{self.insert_hotkey}] inserts the locked value + Enter, works even outside this window.")
+        print("Controls: [r] rotate  |  [+/-] zoom  |  [c] re-copy  |  [f] cycle format  |  "
+              "[t] type custom format  |  [p] pause/resume OCR  |  [d] toggle insert direction  |  [q] quit")
+        print(f"Global hotkey [{self.insert_hotkey}] inserts the locked value + "
+              f"{'Enter' if self.insert_direction == 'down' else 'Shift+Enter'}, works even outside this window.")
         print("Left-click and drag on the video to set the capture box.")
 
         try:
@@ -246,7 +361,9 @@ class VoucherScanner:
                 x1, y1, x2, y2 = self.box
 
                 self.frame_count += 1
-                if self.frame_count % self.ocr_every_n_frames == 0 and x2 > x1 and y2 > y1:
+                if (not self.paused and
+                        self.frame_count % self.ocr_every_n_frames == 0 and
+                        x2 > x1 and y2 > y1):
                     crop = frame[y1:y2, x1:x2]
                     if crop.size > 0:
                         self.detected, processed = self.ocr_engine.run(crop)
@@ -255,8 +372,13 @@ class VoucherScanner:
                     else:
                         self.detected = ""
 
-                # Alignment box: green when locked, yellow while still checking
-                box_color = (0, 200, 0) if self.locked else (0, 255, 255)
+                # Alignment box: gray when paused, green when locked, yellow while checking
+                if self.paused:
+                    box_color = (150, 150, 150)
+                elif self.locked:
+                    box_color = (0, 200, 0)
+                else:
+                    box_color = (0, 255, 255)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
                 display_frame = self._compose_display(frame, w)
