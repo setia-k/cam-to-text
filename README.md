@@ -52,6 +52,8 @@ Virtual Camera usually isn't index 0 if you have a laptop webcam too.
 | `t` | Type a format: saved name (`cw`) or pattern (`3,3,6`). Shows what you type + a live preview; new patterns are saved to `formats.json` |
 | `p` | Pause/resume OCR |
 | `d` | Toggle insert direction (Enter / Shift+Enter) |
+| `[` / `]` | Lower / raise the minimum OCR confidence by 0.05 (0 = off). Reads below it count as unreadable. The live score shows as `conf 0.97` |
+| `i` | Idle skip on/off: once locked, OCR pauses while the box looks unchanged (`idle*` = currently skipping). It re-checks periodically, and wakes on any visible change |
 | `c` | Re-copy the currently locked value to clipboard |
 | `q` | Quit |
 | `\` (global hotkey) | **Not currently reliable** — intended to type the locked value into the focused field + Enter. Didn't work reliably in testing (likely needs Admin / hook permissions); clipboard + manual paste is the current workflow instead. |

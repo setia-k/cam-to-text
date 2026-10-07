@@ -47,6 +47,8 @@ class VoucherScanner:
                  capture_delimiter="-",
                  info_bar_height=90,
                  confirm_streak=3,
+                 min_confidence=0.0,
+                 idle_skip=True, idle_change_fraction=0.001, idle_recheck_every=10,
                  insert_hotkey="\\"):
         self.ocr_engine = ocr_engine
         self.camera_index = camera_index
@@ -60,6 +62,21 @@ class VoucherScanner:
         self.info_bar_height = info_bar_height
         self.confirm_streak = confirm_streak      # consecutive matching reads to lock
         self.insert_hotkey = insert_hotkey         # global hotkey to insert + advance
+
+        # Confidence filter: reads scoring below this are treated as unreadable
+        # (never enter the streak). 0 = off. Adjust live with [ and ].
+        self.min_confidence = min_confidence
+        self.confidence = None
+
+        # Idle skip: once locked, stop running OCR while the crop is visually
+        # unchanged (saves CPU). Never skips the lock-confirming reads, and
+        # still re-checks every `idle_recheck_every` OCR slots as a safety net.
+        self.idle_skip = idle_skip
+        self.idle_change_fraction = idle_change_fraction   # share of pixels that may change and still count as "same"
+        self.idle_recheck_every = idle_recheck_every
+        self.idle = False
+        self._idle_ref = None
+        self._idle_count = 0
 
         # Display format state — cycle presets with 'f', or type a custom
         # one with 't' (e.g. type "3,3,6" then Enter) without restarting
@@ -286,6 +303,40 @@ class VoucherScanner:
             # unlock so the UI honestly reflects "still checking", not stale data.
             self.locked = False
 
+    # ---- idle skip / confidence ----------------------------------------
+    @staticmethod
+    def _idle_signature(crop):
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(gray, (5, 5), 0)
+
+    def _can_idle(self, crop):
+        """True if OCR can be skipped for this frame: locked, crop unchanged
+        since the lock, and not a periodic re-check."""
+        if not (self.idle_skip and self.locked and self._idle_ref is not None):
+            return False
+        self._idle_count += 1
+        if self._idle_count % self.idle_recheck_every == 0:
+            return False
+        sig = self._idle_signature(crop)
+        if sig.shape != self._idle_ref.shape:
+            return False
+        changed = (cv2.absdiff(sig, self._idle_ref) > 30).mean()
+        return changed < self.idle_change_fraction
+
+    def _update_idle_ref(self, crop):
+        self._idle_ref = self._idle_signature(crop) if self.locked else None
+
+    def _usable(self):
+        return (self.min_confidence <= 0 or self.confidence is None
+                or self.confidence >= self.min_confidence)
+
+    def _conf_text(self):
+        return f"  conf {self.confidence:.2f}" if self.confidence is not None else ""
+
+    def _tuning_text(self):
+        idle = ("idle*" if self.idle else "idle") if self.idle_skip else "idle off"
+        return f"MinConf {self.min_confidence:.2f}  {idle}"
+
     def _compose_display(self, frame, width):
         """Builds a separate black info bar below the video frame (not
         overlaid on top of the pixels) and stacks them with vconcat."""
@@ -312,7 +363,7 @@ class VoucherScanner:
             status_color = (0, 200, 0)
         else:
             status_text = (f"Reading: {self._format_display(self.detected)} "
-                           f"({len(self.detected)}/{self._expected_digits()})")
+                           f"({len(self.detected)}/{self._expected_digits()}{self._conf_text()})")
             status_color = (0, 255, 255)
 
         cv2.putText(bar, status_text, (15, 25),
@@ -328,6 +379,8 @@ class VoucherScanner:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         cv2.putText(bar, f"Format: {self.format_names[self.format_index]}  Len: {self._expected_digits()}",
                     (width - 230, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.putText(bar, self._tuning_text(), (width - 230, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
         return cv2.vconcat([frame, bar])
 
@@ -371,6 +424,13 @@ class VoucherScanner:
             self.paused = not self.paused
         elif key == ord('d'):
             self.insert_direction = "up" if self.insert_direction == "down" else "down"
+        elif key == ord('['):
+            self.min_confidence = max(0.0, round(self.min_confidence - 0.05, 2))
+        elif key == ord(']'):
+            self.min_confidence = min(0.99, round(self.min_confidence + 0.05, 2))
+        elif key == ord('i'):
+            self.idle_skip = not self.idle_skip
+            self._idle_ref = None
         return True
 
     def _apply_typed_format(self):
@@ -405,7 +465,8 @@ class VoucherScanner:
 
     def _print_controls(self):
         print("Controls: [r] rotate  |  [+/-] zoom  |  [c] re-copy  |  [f] cycle format  |  "
-              "[t] type custom format  |  [p] pause/resume OCR  |  [d] toggle insert direction  |  [q] quit")
+              "[t] type custom format  |  [p] pause/resume OCR  |  [d] toggle insert direction  |  "
+              "[ / ] min confidence  |  [i] idle skip on/off  |  [q] quit")
         print(f"Global hotkey [{self.insert_hotkey}] inserts the locked value + "
               f"{'Enter' if self.insert_direction == 'down' else 'Shift+Enter'}, works even outside this window.")
         print("Left-click and drag on the video to set the capture box.")
@@ -448,9 +509,16 @@ class VoucherScanner:
                         x2 > x1 and y2 > y1):
                     crop = frame[y1:y2, x1:x2]
                     if crop.size > 0:
-                        self.detected, processed = self.ocr_engine.run(crop)
-                        self._update_lock(self.detected)
-                        cv2.imshow("OCR Input (what the engine sees)", processed)
+                        if self._can_idle(crop):
+                            self.idle = True
+                        else:
+                            self.idle = False
+                            self.detected, processed = self.ocr_engine.run(crop)
+                            self.confidence = getattr(self.ocr_engine, "last_confidence", None)
+                            # low-confidence reads count as unreadable: no streak, no lock
+                            self._update_lock(self.detected if self._usable() else "")
+                            self._update_idle_ref(crop)
+                            cv2.imshow("OCR Input (what the engine sees)", processed)
                     else:
                         self.detected = ""
 

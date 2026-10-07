@@ -6,6 +6,9 @@ from abc import ABC, abstractmethod
 
 
 class OCREngine(ABC):
+    # Confidence (0-1) of the most recent run(), or None if the engine has none.
+    last_confidence = None
+
     @abstractmethod
     def run(self, crop):
         """

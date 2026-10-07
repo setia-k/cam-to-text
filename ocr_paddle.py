@@ -43,8 +43,10 @@ class PaddleEngine(OCREngine):
         result = self._model.predict(processed)
 
         if not result:
+            self.last_confidence = 0.0
             return "", processed
 
         text = result[0]["rec_text"]
+        self.last_confidence = float(result[0].get("rec_score", 0.0))
         digits = "".join(ch for ch in text if ch.isdigit())
         return digits, processed

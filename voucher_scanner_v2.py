@@ -220,7 +220,7 @@ class VoucherScannerV2(VoucherScanner):
                 text, color = f"DUPLICATE of #{idx + 1}: {shown}", (0, 0, 255)
         else:
             text = (f"Reading: {self._format_display(self.detected)} "
-                    f"({len(self.detected)}/{self._expected_digits()})")
+                    f"({len(self.detected)}/{self._expected_digits()}{self._conf_text()})")
             color = (0, 255, 255)
         cv2.putText(bar, text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
@@ -249,12 +249,15 @@ class VoucherScannerV2(VoucherScanner):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         cv2.putText(bar, f"Format: {self.format_names[self.format_index]}  Len: {self._expected_digits()}",
                     (width - 230, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.putText(bar, self._tuning_text(), (width - 230, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
         return cv2.vconcat([frame, bar])
 
     def _print_controls(self):
         print("v2 controls: [\\] add to list (global)  |  [u] undo last  |  [n] stack done  |  "
               "[e] export to clipboard  |  [d] switch pass 1/2  |  [f] cycle format  |  "
-              "[t] type format  |  [p] pause OCR  |  [r] rotate  |  [+/-] zoom  |  [q] quit")
+              "[t] type format  |  [p] pause OCR  |  [ / ] min confidence  |  [i] idle skip  |  "
+              "[r] rotate  |  [+/-] zoom  |  [q] quit")
         print("Left-click and drag on the video to set the capture box.")
 
 
