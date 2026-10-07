@@ -7,9 +7,13 @@ already cropped tightly to just the number line with the drag-box — running
 full detection on top of that would be redundant and slower.
 
 SETUP:
-    pip install paddlepaddle paddleocr
-    (first run downloads the recognition model automatically, ~tens of MB,
-    needs internet once; cached locally after that)
+    pip install -r requirements.txt   (needs paddleocr >= 3.7 for PP-OCRv6)
+    (first run downloads the recognition model automatically, needs internet
+    once; cached locally after that)
+
+MODELS (recognition): PP-OCRv6_tiny_rec (4 MB, fastest), PP-OCRv6_small_rec
+(20 MB, default), PP-OCRv6_medium_rec (73 MB, most accurate). The old
+PP-OCRv5_mobile_rec still works too — pass it as model_name.
 """
 
 import cv2
@@ -18,10 +22,10 @@ from ocr_base import OCREngine
 
 
 class PaddleEngine(OCREngine):
-    def __init__(self, denoise_strength=10):
+    def __init__(self, model_name="PP-OCRv6_small_rec", denoise_strength=10):
         # Loaded once here, not per-frame — model loading is slow (~seconds),
         # inference on each frame is fast.
-        self._model = TextRecognition()
+        self._model = TextRecognition(model_name=model_name)
         self.denoise_strength = denoise_strength
 
     def _preprocess(self, crop):

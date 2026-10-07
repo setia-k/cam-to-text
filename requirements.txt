@@ -1,0 +1,6 @@
+opencv-python
+numpy
+pyperclip
+keyboard
+paddlepaddle
+paddleocr>=3.7

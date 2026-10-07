@@ -5,58 +5,45 @@ Video capture + draggable box overlay + OCR reading
 FILES:
    voucher_scanner.py  <- this file: VoucherScanner class, camera/box/zoom/UI loop
    ocr_base.py         <- abstract interface all OCR engines implement
-   ocr_tesseract.py    <- active OCR engine (Tesseract + preprocessing)
-   ocr_paddle.py        <- stub for PaddleOCR, not implemented yet
-
-To switch OCR engines later: at the bottom of this file, swap which class
-you instantiate — `PaddleEngine()` or `TesseractEngine()`. Both implement
-the same OCREngine interface, so nothing else needs to change.
-
-SETUP REQUIRED (one-time, outside pip):
-1. Install Tesseract OCR engine (this is NOT the python package, it's the actual engine):
-   - Windows: https://github.com/UB-Mannheim/tesseract/wiki (installer .exe)
-     After install, note the path, usually: C:\\Program Files\\Tesseract-OCR\\tesseract.exe
-   - Mac: brew install tesseract
-   - Linux: sudo apt install tesseract-ocr
-
-2. Install DroidCam (or similar) on your phone + PC client, connect via USB,
-   it will show up as a regular webcam.
+   ocr_paddle.py       <- PaddleOCR engine (recognition-only, CPU)
+   formats.json        <- saved display formats (auto-created, editable)
 
 PIP INSTALL:
-   pip install opencv-python pytesseract
+   pip install -r requirements.txt
 
 NEXT STEPS (not yet implemented, coming later):
    - auto-clear "Last inserted" display after some time
    - reset OCR history when the box is redrawn (avoid stale streaks)
 """
 
+import json
+import os
 import cv2
 import numpy as np
 import pyperclip
 import keyboard
 import threading
 from collections import deque
-from ocr_tesseract import TesseractEngine
 from ocr_paddle import PaddleEngine
+
+FORMATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "formats.json")
+
+# Used only the first time, before formats.json exists.
+DEFAULT_FORMATS = {
+    "cw": [3, 3, 6],
+    "if": [5, 5, 2],
+    "op3": [4, 4, 6],
+}
 
 
 class VoucherScanner:
-    # Named display formats: each is a list of segment lengths.
-    # "cw" -> xxx xxx xxxxxx   |   "if" -> xxxxx xxxxx xx
-    # Add more operators here as you encounter them — key is just a label.
-    FORMAT_PRESETS = {
-        "cw": [3, 3, 6],
-        "if": [5, 5, 2],
-        "op3": [4, 4, 6],  # rename/adjust as needed
-    }
-
     def __init__(self, ocr_engine, camera_index=0,
                  box_width=400, box_height=80,
                  zoom_step=0.1, zoom_min=1.0, zoom_max=4.0,
                  ocr_every_n_frames=2,
                  capture_delimiter="-",
-                 info_bar_height=60,
-                 confirm_streak=3, min_lock_digits=6,
+                 info_bar_height=90,
+                 confirm_streak=3,
                  insert_hotkey="\\"):
         self.ocr_engine = ocr_engine
         self.camera_index = camera_index
@@ -69,15 +56,12 @@ class VoucherScanner:
         self.capture_delimiter = capture_delimiter
         self.info_bar_height = info_bar_height
         self.confirm_streak = confirm_streak      # consecutive matching reads to lock
-        self.min_lock_digits = min_lock_digits     # ignore short/partial reads
         self.insert_hotkey = insert_hotkey         # global hotkey to insert + advance
 
         # Display format state — cycle presets with 'f', or type a custom
         # one with 't' (e.g. type "3,3,6" then Enter) without restarting
-        self.format_names = list(self.FORMAT_PRESETS.keys())
-        if "custom" not in self.FORMAT_PRESETS:
-            self.FORMAT_PRESETS["custom"] = list(self.FORMAT_PRESETS[self.format_names[0]])
-            self.format_names.append("custom")
+        self.formats = self._load_formats()
+        self.format_names = list(self.formats.keys())
         self.format_index = 0
         self.typing_format = False
         self.typing_buffer = ""
@@ -111,17 +95,27 @@ class VoucherScanner:
         self.window_name = "Voucher Scanner"
         self.cap = None
 
-    def _format_display(self, digits):
-        """Groups raw digits according to the currently selected named
-        format's segment lengths (e.g. [3,3,6] -> xxx-xxx-xxxxxx) for
-        on-screen display only. self.detected / self.locked_value stay pure
-        digits — this is purely cosmetic and never affects what gets
-        copied or inserted elsewhere."""
-        if not digits:
-            return digits
+    # ---- display formats ----------------------------------------------
+    @staticmethod
+    def _load_formats():
+        try:
+            with open(FORMATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            formats = {str(k): [int(n) for n in v] for k, v in data.items() if v}
+            if formats:
+                return formats
+        except (OSError, ValueError, TypeError):
+            pass
+        return dict(DEFAULT_FORMATS)
 
-        sizes = self.FORMAT_PRESETS[self.format_names[self.format_index]]
+    def _save_formats(self):
+        try:
+            with open(FORMATS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.formats, f, indent=2)
+        except OSError as e:
+            print(f"Could not save formats: {e}")
 
+    def _group(self, digits, sizes):
         groups = []
         i = 0
         for size in sizes:
@@ -131,11 +125,52 @@ class VoucherScanner:
             i += size
         if i < len(digits):
             groups.append(digits[i:])  # leftover digits beyond the pattern
-
         return self.capture_delimiter.join(groups)
+
+    def _parse_pattern(self, text):
+        """'3,3,6' / '3 3 6' / '3-3-6' -> [3, 3, 6]; None if invalid."""
+        parts = text.replace("-", ",").replace(" ", ",").split(",")
+        try:
+            sizes = [int(p) for p in parts if p.strip()]
+        except ValueError:
+            return None
+        return sizes if sizes and all(n > 0 for n in sizes) else None
+
+    def _typing_preview(self):
+        """What the typed text would do if Enter were pressed now."""
+        text = self.typing_buffer.strip()
+        if not text:
+            return "(empty)"
+        for name in self.format_names:
+            if name.lower() == text.lower():
+                return f"switch to '{name}': " + self._group("1234567890123456789", self.formats[name])
+        sizes = self._parse_pattern(text)
+        if sizes is None:
+            return "invalid - use a saved name or numbers like 3,3,6"
+        return "new format: " + self._group("1234567890123456789", sizes)
+
+    def _format_display(self, digits):
+        """Groups raw digits according to the currently selected named
+        format's segment lengths (e.g. [3,3,6] -> xxx-xxx-xxxxxx) for
+        on-screen display only. self.detected / self.locked_value stay pure
+        digits — this is purely cosmetic and never affects what gets
+        copied or inserted elsewhere."""
+        if not digits:
+            return digits
+        return self._group(digits, self.formats[self.format_names[self.format_index]])
+
+    def _expected_digits(self):
+        return sum(self.formats[self.format_names[self.format_index]])
+
+    def _reset_lock(self):
+        """Format changed -> the old lock/streak was validated against a
+        different length, so drop it."""
+        self.history.clear()
+        self.locked = False
 
     def _cycle_format(self):
         self.format_index = (self.format_index + 1) % len(self.format_names)
+        self._reset_lock()
 
     # ---- mouse handling ----------------------------------------------
     def _mouse_callback(self, event, x, y, flags, param):
@@ -200,7 +235,9 @@ class VoucherScanner:
         `confirm_streak` consecutive reads agree. Keeps running even while
         already locked, so swapping to a new voucher auto-relocks onto the
         new number without any manual unlock step."""
-        if len(reading) < self.min_lock_digits:
+        # Only reads with exactly the digit count of the active format can lock;
+        # partial/garbled reads (wrong length) never enter the streak.
+        if len(reading) != self._expected_digits():
             self.history.clear()
             self.locked = False
             return
@@ -226,8 +263,17 @@ class VoucherScanner:
         bar = np.zeros((self.info_bar_height, width, 3), dtype=np.uint8)
 
         if self.typing_format:
-            status_text = f"New format — type a preset name (cw/if) or pattern (3,3,6), Enter=apply, Esc=cancel: {self.typing_buffer}"
-            status_color = (255, 255, 255)
+            # Dedicated layout: what you've typed, a live preview, and hints,
+            # each on its own short line so nothing runs off the window.
+            cv2.putText(bar, f"FORMAT> {self.typing_buffer}_", (15, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(bar, self._typing_preview(), (15, 52),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+            cv2.putText(bar, f"Saved: {', '.join(self.format_names)}", (15, 72),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            cv2.putText(bar, "Enter=apply  Esc=cancel", (width - 220, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
+            return cv2.vconcat([frame, bar])
         elif self.paused:
             status_text = "PAUSED (press p to resume) — last locked value still usable"
             status_color = (0, 165, 255)
@@ -236,7 +282,8 @@ class VoucherScanner:
             status_text = f"LOCKED: {self._format_display(self.locked_value)}{copied_flag}"
             status_color = (0, 200, 0)
         else:
-            status_text = f"Reading: {self._format_display(self.detected)}"
+            status_text = (f"Reading: {self._format_display(self.detected)} "
+                           f"({len(self.detected)}/{self._expected_digits()})")
             status_color = (0, 255, 255)
 
         cv2.putText(bar, status_text, (15, 25),
@@ -270,7 +317,7 @@ class VoucherScanner:
                 self.typing_buffer = ""
             elif key == 8:  # Backspace
                 self.typing_buffer = self.typing_buffer[:-1]
-            elif chr(key).isalnum() or chr(key) == ',':
+            elif 32 <= key < 127 and (chr(key).isalnum() or chr(key) in ", -"):
                 self.typing_buffer += chr(key)
             return True
 
@@ -299,30 +346,31 @@ class VoucherScanner:
 
     def _apply_typed_format(self):
         """Two ways to use this:
-          - type a known preset name (e.g. 'cw', 'if') to switch to it directly
-          - type a numeric pattern (e.g. '3,3,6') to define a one-off format,
-            stored as the 'custom' preset and switched to immediately
-        No restart needed either way."""
+          - type a saved name (e.g. 'cw', 'if') to switch to it directly
+          - type a numeric pattern (e.g. '3,3,6'): it is saved to formats.json
+            under its own pattern as the name (e.g. '3,3,6') and switched to,
+            so it's still in the 'f' cycle after a restart."""
         text = self.typing_buffer.strip()
         if not text:
             return
 
-        # Named preset match (case-insensitive)
         for name in self.format_names:
             if name.lower() == text.lower():
                 self.format_index = self.format_names.index(name)
+                self._reset_lock()
                 return
 
-        # Otherwise treat it as a numeric pattern
-        try:
-            sizes = [int(part) for part in text.split(",") if part.strip()]
-            if not sizes:
-                return
-        except ValueError:
+        sizes = self._parse_pattern(text)
+        if sizes is None:
             return  # not a known name and not a valid numeric pattern — drop it
 
-        self.FORMAT_PRESETS["custom"] = sizes
-        self.format_index = self.format_names.index("custom")
+        name = ",".join(str(n) for n in sizes)
+        if name not in self.formats:
+            self.formats[name] = sizes
+            self.format_names.append(name)
+            self._save_formats()
+        self.format_index = self.format_names.index(name)
+        self._reset_lock()
 
     # ---- main loop ----------------------------------------------
     def run(self):
@@ -395,7 +443,6 @@ class VoucherScanner:
 
 if __name__ == "__main__":
     engine = PaddleEngine()
-    # engine = TesseractEngine()  # swap back to this if you want to compare
 
     scanner = VoucherScanner(ocr_engine=engine, camera_index=0)
     scanner.run()

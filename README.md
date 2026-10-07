@@ -8,9 +8,8 @@ manual data entry, not to fully replace verification.
 - `voucher_scanner.py` — main app: `VoucherScanner` class (camera, draggable
   box, zoom, rotate, auto-lock, clipboard, global hotkey)
 - `ocr_base.py` — abstract `OCREngine` interface
-- `ocr_tesseract.py` — Tesseract engine implementation
-- `ocr_paddle.py` — PaddleOCR engine implementation (currently active, more
-  accurate on stylized/textured voucher fonts)
+- `ocr_paddle.py` — PaddleOCR recognition-only engine (PP-OCRv6, CPU)
+- `formats.json` — saved display formats (auto-created, editable)
 
 ## One-time setup
 
@@ -29,12 +28,7 @@ No app needed on the phone. Uses scrcpy's camera mode + OBS Virtual Camera:
 6. In OBS: Sources → `+` → Window Capture → select the scrcpy window
 7. Click **Start Virtual Camera** (bottom right of OBS)
 
-### 2. Tesseract OCR engine (system install, not pip)
-Only needed if using the Tesseract engine instead of PaddleOCR:
-- Windows installer: https://github.com/UB-Mannheim/tesseract/wiki
-- If not on PATH, set the path manually at the top of `ocr_tesseract.py`
-
-### 3. Python dependencies
+### 2. Python dependencies
 ```
 pip install -r requirements.txt
 ```
@@ -54,6 +48,10 @@ Virtual Camera usually isn't index 0 if you have a laptop webcam too.
 | Left-click + drag on video | Redraw the capture box |
 | `r` | Toggle 180° rotation (for upside-down phone mounting) |
 | `+` / `-` | Zoom in / out |
+| `f` | Cycle display format |
+| `t` | Type a format: saved name (`cw`) or pattern (`3,3,6`). Shows what you type + a live preview; new patterns are saved to `formats.json` |
+| `p` | Pause/resume OCR |
+| `d` | Toggle insert direction (Enter / Shift+Enter) |
 | `c` | Re-copy the currently locked value to clipboard |
 | `q` | Quit |
 | `\` (global hotkey) | **Not currently reliable** — intended to type the locked value into the focused field + Enter. Didn't work reliably in testing (likely needs Admin / hook permissions); clipboard + manual paste is the current workflow instead. |
@@ -66,13 +64,9 @@ Virtual Camera usually isn't index 0 if you have a laptop webcam too.
 4. Swap to the next voucher — it auto-unlocks and relocks on the new number,
    no manual reset needed
 
-## Switching OCR engines
-At the bottom of `voucher_scanner.py`:
-```python
-engine = PaddleEngine()      # currently active — better on textured fonts
-# engine = TesseractEngine()  # lighter weight, no model download
-```
-Both implement the same `OCREngine` interface, so nothing else changes.
+## Choosing the OCR model
+`PaddleEngine(model_name=...)` in `voucher_scanner.py`: `PP-OCRv6_tiny_rec`
+(fastest), `PP-OCRv6_small_rec` (default), `PP-OCRv6_medium_rec` (most accurate).
 
 ## Known issues / possible next steps
 - Global hotkey (`\`) doesn't reliably fire when a non-Python window (e.g.
