@@ -68,6 +68,22 @@ Virtual Camera usually isn't index 0 if you have a laptop webcam too.
 `PaddleEngine(model_name=...)` in `voucher_scanner.py`: `PP-OCRv6_tiny_rec`
 (fastest), `PP-OCRv6_small_rec` (default), `PP-OCRv6_medium_rec` (most accurate).
 
+## v2 (experimental): ordered list instead of typing into Excel
+`python voucher_scanner_v2.py` (`--resume` to continue the last session).
+`voucher_scanner.py` is untouched in behavior and remains the fallback.
+
+| Key | Effect |
+|---|---|
+| `\` | Add locked value to the list (blocked if already in this pass) |
+| `u` | Undo last entry (then it can be rescanned) |
+| `n` | Close a stack; warns if the count isn't 25 |
+| `d` | Switch pass 1 / pass 2 |
+| `e` | Copy the pass to the clipboard, one per line (pass 2 is reversed) — paste at A1 |
+
+Autosaved to `session.json`; a previous session is renamed, never overwritten.
+Format the Excel column as Text before pasting (12-digit numbers otherwise
+become scientific notation).
+
 ## Known issues / possible next steps
 - Global hotkey (`\`) doesn't reliably fire when a non-Python window (e.g.
   Excel) has focus — needs debugging (try running as Administrator first)

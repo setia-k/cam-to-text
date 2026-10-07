@@ -28,6 +28,9 @@ from ocr_paddle import PaddleEngine
 
 FORMATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "formats.json")
 
+LAST_FORMAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_format.txt")
+DEFAULT_DIGITS = 14   # TW prepaid card vouchers are always 14 digits
+
 # Used only the first time, before formats.json exists.
 DEFAULT_FORMATS = {
     "cw": [3, 3, 6],
@@ -62,7 +65,14 @@ class VoucherScanner:
         # one with 't' (e.g. type "3,3,6" then Enter) without restarting
         self.formats = self._load_formats()
         self.format_names = list(self.formats.keys())
-        self.format_index = 0
+        # Start on the format used last time; if there isn't one, on the first
+        # format that adds up to the standard voucher length (14 digits).
+        last = self._load_last_format()
+        if last in self.format_names:
+            self.format_index = self.format_names.index(last)
+        else:
+            self.format_index = next((i for i, n in enumerate(self.format_names)
+                                      if sum(self.formats[n]) == DEFAULT_DIGITS), 0)
         self.typing_format = False
         self.typing_buffer = ""
 
@@ -108,6 +118,21 @@ class VoucherScanner:
             pass
         return dict(DEFAULT_FORMATS)
 
+    @staticmethod
+    def _load_last_format():
+        try:
+            with open(LAST_FORMAT_FILE, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def _remember_format(self):
+        try:
+            with open(LAST_FORMAT_FILE, "w", encoding="utf-8") as f:
+                f.write(self.format_names[self.format_index])
+        except OSError:
+            pass
+
     def _save_formats(self):
         try:
             with open(FORMATS_FILE, "w", encoding="utf-8") as f:
@@ -139,15 +164,17 @@ class VoucherScanner:
     def _typing_preview(self):
         """What the typed text would do if Enter were pressed now."""
         text = self.typing_buffer.strip()
+        sample = "12345678901234567890"
         if not text:
             return "(empty)"
         for name in self.format_names:
             if name.lower() == text.lower():
-                return f"switch to '{name}': " + self._group("1234567890123456789", self.formats[name])
+                sizes = self.formats[name]
+                return f"switch to '{name}' ({sum(sizes)} digits): " + self._group(sample, sizes)
         sizes = self._parse_pattern(text)
         if sizes is None:
             return "invalid - use a saved name or numbers like 3,3,6"
-        return "new format: " + self._group("1234567890123456789", sizes)
+        return f"new format ({sum(sizes)} digits): " + self._group(sample, sizes)
 
     def _format_display(self, digits):
         """Groups raw digits according to the currently selected named
@@ -160,6 +187,7 @@ class VoucherScanner:
         return self._group(digits, self.formats[self.format_names[self.format_index]])
 
     def _expected_digits(self):
+        """Lock length = total of the active format's groups (3,3,6 -> 12)."""
         return sum(self.formats[self.format_names[self.format_index]])
 
     def _reset_lock(self):
@@ -171,6 +199,7 @@ class VoucherScanner:
     def _cycle_format(self):
         self.format_index = (self.format_index + 1) % len(self.format_names)
         self._reset_lock()
+        self._remember_format()
 
     # ---- mouse handling ----------------------------------------------
     def _mouse_callback(self, event, x, y, flags, param):
@@ -297,8 +326,8 @@ class VoucherScanner:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.putText(bar, f"Zoom: {self.zoom:.1f}x", (width - 130, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        cv2.putText(bar, f"Format: {self.format_names[self.format_index]}", (width - 130, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.putText(bar, f"Format: {self.format_names[self.format_index]}  Len: {self._expected_digits()}",
+                    (width - 230, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
         return cv2.vconcat([frame, bar])
 
@@ -358,6 +387,7 @@ class VoucherScanner:
             if name.lower() == text.lower():
                 self.format_index = self.format_names.index(name)
                 self._reset_lock()
+                self._remember_format()
                 return
 
         sizes = self._parse_pattern(text)
@@ -371,6 +401,14 @@ class VoucherScanner:
             self._save_formats()
         self.format_index = self.format_names.index(name)
         self._reset_lock()
+        self._remember_format()
+
+    def _print_controls(self):
+        print("Controls: [r] rotate  |  [+/-] zoom  |  [c] re-copy  |  [f] cycle format  |  "
+              "[t] type custom format  |  [p] pause/resume OCR  |  [d] toggle insert direction  |  [q] quit")
+        print(f"Global hotkey [{self.insert_hotkey}] inserts the locked value + "
+              f"{'Enter' if self.insert_direction == 'down' else 'Shift+Enter'}, works even outside this window.")
+        print("Left-click and drag on the video to set the capture box.")
 
     # ---- main loop ----------------------------------------------
     def run(self):
@@ -386,11 +424,7 @@ class VoucherScanner:
         # landing in whatever field is focused, before our inserted digits do
         keyboard.add_hotkey(self.insert_hotkey, self._insert_and_advance, suppress=True)
 
-        print("Controls: [r] rotate  |  [+/-] zoom  |  [c] re-copy  |  [f] cycle format  |  "
-              "[t] type custom format  |  [p] pause/resume OCR  |  [d] toggle insert direction  |  [q] quit")
-        print(f"Global hotkey [{self.insert_hotkey}] inserts the locked value + "
-              f"{'Enter' if self.insert_direction == 'down' else 'Shift+Enter'}, works even outside this window.")
-        print("Left-click and drag on the video to set the capture box.")
+        self._print_controls()
 
         try:
             while True:
