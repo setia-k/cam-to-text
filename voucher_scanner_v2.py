@@ -22,7 +22,8 @@ changes only the workflow:
     top if unfinished so rows stay aligned. Format the column as Text.
 
 The last session is resumed automatically on start. To start a new one, press
-N twice in the app, or launch with --new. The old session.json is always
+N twice in the app, or launch with --new. To continue an archived session:
+`--resume session_20261008_141857.json` (name or path). The old session.json is always
 renamed to session_<timestamp>.json, never overwritten or deleted.
 """
 
@@ -52,7 +53,7 @@ class PassState:
 
 
 class VoucherScannerV2(VoucherScanner):
-    def __init__(self, *args, stack_size=25, total_rows=100, fresh=False, **kwargs):
+    def __init__(self, *args, stack_size=25, total_rows=100, fresh=False, resume_from=None, **kwargs):
         kwargs.setdefault("info_bar_height", 120)
         super().__init__(*args, **kwargs)
         self.stack_size = stack_size
@@ -62,7 +63,7 @@ class VoucherScannerV2(VoucherScanner):
         self.message = ""
         self.message_until = 0.0
         self._new_confirm_until = 0.0
-        self._start_session(fresh)
+        self._start_session(fresh, resume_from)
 
     # ---- session persistence ----------------------------------------
     @property
@@ -98,26 +99,65 @@ class VoucherScannerV2(VoucherScanner):
         self._save()
         self._say("New session started (old one archived)", 6)
 
-    def _start_session(self, fresh):
+    def _load_from(self, path):
+        """Load a session file into memory. Returns True on success."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for n in (1, 2):
+                p = data.get(f"pass{n}", {})
+                self.passes[n].entries = list(p.get("entries", []))
+                self.passes[n].stack_ends = list(p.get("stack_ends", []))
+            if data.get("version", 1) < 2:
+                self._orient_old_pass2()
+            self.pass_no = int(data.get("pass_no", 1))
+            print(f"Loaded {os.path.basename(path)}: pass1={len(self.passes[1].entries)}, "
+                  f"pass2={len(self.passes[2].entries)}")
+            return True
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            print(f"Could not read {os.path.basename(path)}: {e}")
+            return False
+
+    def _orient_old_pass2(self):
+        """Files without a version stored pass 2 in scan order (bottom card
+        first), but some were written in row order anyway. Keep whichever order
+        lines up with pass 1 at the rows pass 2 would occupy; if equal, assume
+        scan order and reverse."""
+        p1, e2 = self.passes[1].entries, self.passes[2].entries
+        first_row = self.total_rows - len(e2) + 1
+
+        def matches(order):
+            return sum(1 for i, val in enumerate(order)
+                       if 1 <= first_row + i <= len(p1) and p1[first_row + i - 1] == val)
+
+        if matches(e2[::-1]) >= matches(e2):
+            e2.reverse()
+
+    def _start_session(self, fresh, resume_from=None):
+        if resume_from:
+            path = resume_from
+            if not os.path.exists(path):   # also accept a bare name from this folder
+                path = os.path.join(os.path.dirname(SESSION_FILE), resume_from)
+            if not os.path.exists(path) and not path.endswith(".json"):
+                path += ".json"
+            if not os.path.exists(path):
+                print(f"Session file not found: {resume_from} - starting with the current session.")
+            elif os.path.abspath(path) == os.path.abspath(SESSION_FILE):
+                self._load_from(path)
+                return
+            else:
+                if os.path.exists(SESSION_FILE):
+                    self._archive_session()   # keep whatever is in the working session
+                if self._load_from(path):
+                    self._save()              # becomes the working session.json
+                return
+
         if not os.path.exists(SESSION_FILE):
             return
-        if not fresh:
-            try:
-                with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                for n in (1, 2):
-                    p = data.get(f"pass{n}", {})
-                    self.passes[n].entries = list(p.get("entries", []))
-                    self.passes[n].stack_ends = list(p.get("stack_ends", []))
-                if data.get("version", 1) < 2:
-                    self.passes[2].entries.reverse()   # old files stored pass 2 in scan order
-                self.pass_no = int(data.get("pass_no", 1))
-                print(f"Resumed session: pass1={len(self.passes[1].entries)}, "
-                      f"pass2={len(self.passes[2].entries)}")
-                return
-            except (OSError, ValueError):
-                print("Could not read session.json, starting fresh.")
+        if not fresh and self._load_from(SESSION_FILE):
+            return
         self._archive_session()
+        self._save()   # empty session.json, so the next start doesn't resume the archive
 
     def _save(self):
         data = {"version": SESSION_VERSION, "pass_no": self.pass_no}
@@ -394,6 +434,11 @@ class VoucherScannerV2(VoucherScanner):
 
 if __name__ == "__main__":
     engine = PaddleEngine()
+    resume_from = None
+    if "--resume" in sys.argv:
+        i = sys.argv.index("--resume")
+        if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("--"):
+            resume_from = sys.argv[i + 1]
     scanner = VoucherScannerV2(ocr_engine=engine, camera_index=0,
-                               fresh="--new" in sys.argv)
+                               fresh="--new" in sys.argv, resume_from=resume_from)
     scanner.run()
