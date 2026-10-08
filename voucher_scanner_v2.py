@@ -330,6 +330,26 @@ class VoucherScannerV2(VoucherScanner):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
         return cv2.vconcat([frame, bar])
 
+    def _show_debug(self, processed):
+        """'What the engine sees' window, enlarged, with the number below it:
+        the locked value (green) or the current read (yellow), formatted."""
+        import numpy as np
+        h, w = processed.shape[:2]
+        target_w = max(w, 640)
+        img = cv2.resize(processed, (target_w, int(h * target_w / w)),
+                         interpolation=cv2.INTER_CUBIC) if target_w != w else processed
+
+        strip = np.zeros((70, img.shape[1], 3), dtype=np.uint8)
+        if self.locked:
+            value, color, state = self.locked_value, (0, 200, 0), "LOCKED"
+        else:
+            value, color, state = self.detected, (0, 255, 255), "reading"
+        shown = self._format_display(value) if value else "-"
+        cv2.putText(strip, shown, (15, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+        cv2.putText(strip, f"{state}  {len(value)}/{self._expected_digits()}{self._conf_text()}",
+                    (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        cv2.imshow("OCR Input (what the engine sees)", cv2.vconcat([img, strip]))
+
     def _print_controls(self):
         print("v2 controls: [\\] add to list (global)  |  [u] undo last  |  [n] stack done  |  "
               "[e] export to clipboard  |  [d] switch pass 1/2  |  [f] cycle format  |  "

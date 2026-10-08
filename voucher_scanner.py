@@ -75,6 +75,7 @@ class VoucherScanner:
         self.idle_change_fraction = idle_change_fraction   # share of pixels that may change and still count as "same"
         self.idle_recheck_every = idle_recheck_every
         self.idle = False
+        self._last_processed = None   # last image the OCR engine saw, for the debug window
         self._idle_ref = None
         self._idle_count = 0
 
@@ -471,6 +472,10 @@ class VoucherScanner:
               f"{'Enter' if self.insert_direction == 'down' else 'Shift+Enter'}, works even outside this window.")
         print("Left-click and drag on the video to set the capture box.")
 
+    def _show_debug(self, processed):
+        """The 'what the engine sees' window; subclasses can draw more on it."""
+        cv2.imshow("OCR Input (what the engine sees)", processed)
+
     # ---- main loop ----------------------------------------------
     def run(self):
         self.cap = cv2.VideoCapture(self.camera_index)
@@ -518,9 +523,12 @@ class VoucherScanner:
                             # low-confidence reads count as unreadable: no streak, no lock
                             self._update_lock(self.detected if self._usable() else "")
                             self._update_idle_ref(crop)
-                            cv2.imshow("OCR Input (what the engine sees)", processed)
+                            self._last_processed = processed
                     else:
                         self.detected = ""
+
+                if self._last_processed is not None:
+                    self._show_debug(self._last_processed)
 
                 # Alignment box: gray when paused, green when locked, yellow while checking
                 if self.paused:
