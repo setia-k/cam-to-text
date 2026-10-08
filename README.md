@@ -71,7 +71,7 @@ Virtual Camera usually isn't index 0 if you have a laptop webcam too.
 (fastest), `PP-OCRv6_small_rec` (default), `PP-OCRv6_medium_rec` (most accurate).
 
 ## v2 (experimental): ordered list instead of typing into Excel
-`python voucher_scanner_v2.py` (`--resume` to continue the last session).
+`python voucher_scanner_v2.py` resumes the last session automatically (`--new`, or press `N` twice in the app, archives it and starts fresh).
 `voucher_scanner.py` is untouched in behavior and remains the fallback.
 
 | Key | Effect |

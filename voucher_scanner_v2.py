@@ -21,8 +21,9 @@ changes only the workflow:
     paste at A1 (pass 1) or B1 (pass 2). Pass 2 is padded with blank lines on
     top if unfinished so rows stay aligned. Format the column as Text.
 
-Old session.json is renamed to session_<timestamp>.json on start (never
-overwritten); run with --resume to continue it instead.
+The last session is resumed automatically on start. To start a new one, press
+N twice in the app, or launch with --new. The old session.json is always
+renamed to session_<timestamp>.json, never overwritten or deleted.
 """
 
 import json
@@ -51,7 +52,7 @@ class PassState:
 
 
 class VoucherScannerV2(VoucherScanner):
-    def __init__(self, *args, stack_size=25, total_rows=100, resume=False, **kwargs):
+    def __init__(self, *args, stack_size=25, total_rows=100, fresh=False, **kwargs):
         kwargs.setdefault("info_bar_height", 120)
         super().__init__(*args, **kwargs)
         self.stack_size = stack_size
@@ -60,17 +61,47 @@ class VoucherScannerV2(VoucherScanner):
         self.pass_no = 1
         self.message = ""
         self.message_until = 0.0
-        self._start_session(resume)
+        self._new_confirm_until = 0.0
+        self._start_session(fresh)
 
     # ---- session persistence ----------------------------------------
     @property
     def cur(self):
         return self.passes[self.pass_no]
 
-    def _start_session(self, resume):
+    def _archive_session(self):
+        """Rename session.json to session_<timestamp>.json (never deleted)."""
+        stamp = time.strftime("_%Y%m%d_%H%M%S")
+        backup = SESSION_FILE.replace(".json", f"{stamp}.json")
+        n = 1
+        while os.path.exists(backup):   # never overwrite an earlier archive
+            n += 1
+            backup = SESSION_FILE.replace(".json", f"{stamp}_{n}.json")
+        try:
+            os.replace(SESSION_FILE, backup)
+            print(f"Previous session kept as {os.path.basename(backup)}")
+            return True
+        except OSError as e:
+            print(f"Could not archive old session: {e}")
+            return False
+
+    def _new_session(self):
+        """In-app fresh start (key N, pressed twice): archive and clear."""
+        if os.path.exists(SESSION_FILE) and not self._archive_session():
+            self._say("Could not archive the old session - not cleared", 6)
+            return
+        self.passes = {1: PassState(), 2: PassState()}
+        self.pass_no = 1
+        self.history.clear()
+        self.locked = False
+        self.locked_value = ""
+        self._save()
+        self._say("New session started (old one archived)", 6)
+
+    def _start_session(self, fresh):
         if not os.path.exists(SESSION_FILE):
             return
-        if resume:
+        if not fresh:
             try:
                 with open(SESSION_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -86,12 +117,7 @@ class VoucherScannerV2(VoucherScanner):
                 return
             except (OSError, ValueError):
                 print("Could not read session.json, starting fresh.")
-        backup = SESSION_FILE.replace(".json", time.strftime("_%Y%m%d_%H%M%S.json"))
-        try:
-            os.replace(SESSION_FILE, backup)
-            print(f"Previous session kept as {os.path.basename(backup)}")
-        except OSError as e:
-            print(f"Could not archive old session: {e}")
+        self._archive_session()
 
     def _save(self):
         data = {"version": SESSION_VERSION, "pass_no": self.pass_no}
@@ -253,6 +279,14 @@ class VoucherScannerV2(VoucherScanner):
             if key == ord('d'):
                 self._switch_pass()
                 return True
+            if key == ord('N'):
+                if time.time() < self._new_confirm_until:
+                    self._new_confirm_until = 0.0
+                    self._new_session()
+                else:
+                    self._new_confirm_until = time.time() + 4
+                    self._say("Press N again to archive this session and start a new one", 4)
+                return True
         return super()._handle_key(key)
 
     # ---- display ----------------------------------------------------
@@ -351,7 +385,7 @@ class VoucherScannerV2(VoucherScanner):
         cv2.imshow("OCR Input (what the engine sees)", cv2.vconcat([img, strip]))
 
     def _print_controls(self):
-        print("v2 controls: [\\] add to list (global)  |  [u] undo last  |  [n] stack done  |  "
+        print("v2 controls: [\\] add to list (global)  |  [u] undo last  |  [n] stack done  |  [N,N] new session  |  "
               "[e] export to clipboard  |  [d] switch pass 1/2  |  [f] cycle format  |  "
               "[t] type format  |  [p] pause OCR  |  [ / ] min confidence  |  [i] idle skip  |  "
               "[r] rotate  |  [+/-] zoom  |  [q] quit")
@@ -361,5 +395,5 @@ class VoucherScannerV2(VoucherScanner):
 if __name__ == "__main__":
     engine = PaddleEngine()
     scanner = VoucherScannerV2(ocr_engine=engine, camera_index=0,
-                               resume="--resume" in sys.argv)
+                               fresh="--new" in sys.argv)
     scanner.run()
