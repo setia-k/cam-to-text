@@ -54,7 +54,7 @@ class PassState:
 
 class VoucherScannerV2(VoucherScanner):
     def __init__(self, *args, stack_size=25, total_rows=100, fresh=False, resume_from=None, **kwargs):
-        kwargs.setdefault("info_bar_height", 120)
+        kwargs.setdefault("info_bar_height", 150)
         super().__init__(*args, **kwargs)
         self.stack_size = stack_size
         self.total_rows = total_rows   # pass 2 starts at this row and counts down
@@ -202,6 +202,18 @@ class VoucherScannerV2(VoucherScanner):
             return None
         where = p1.index(value) + 1 if value in p1 else None
         return p1[row - 1] == value, p1[row - 1], where
+
+    def _upcoming_expected(self, count):
+        """Pass 2: [(row, pass-1 value), ...] for the row the next scan takes
+        and the rows after it (counting down); rows pass 1 doesn't have are
+        skipped."""
+        p1 = self.passes[1].entries
+        row = self._next_row()
+        out = []
+        for r in range(row, row - count, -1):
+            if 1 <= r <= len(p1):
+                out.append((r, p1[r - 1]))
+        return out
 
     # ---- lock / insert ----------------------------------------------
     def _dup_index(self, value):
@@ -359,7 +371,7 @@ class VoucherScannerV2(VoucherScanner):
                     text, color = f"MISMATCH #{row}: {shown}", (0, 128, 255)
                     where = (f"this card is pass 1 #{check[2]}" if check[2]
                              else "this card is not in pass 1")
-                    hint = f"pass 1 #{row} is {self._format_display(check[1])} - {where}"
+                    hint = where.capitalize()
             elif idx == self._newest_idx():
                 text, color = f"#{self._row_of(idx)} inserted - next card", (200, 200, 0)
             else:
@@ -377,24 +389,35 @@ class VoucherScannerV2(VoucherScanner):
                          f"Stack {len(p.stack_ends) + 1}: {in_stack}/{self.stack_size}",
                     (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.65, count_color, 2)
 
-        # line 3: last 3 entries, newest first, with their rows
-        newest = self._newest_idx()
-        step = -1 if self.pass_no == 1 else 1
-        tail = "  ".join(f"#{self._row_of(newest + step * i)}:{self._format_display(p.entries[newest + step * i])}"
-                         for i in range(min(3, n)))
-        cv2.putText(bar, tail or "(no entries yet)", (15, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        # line 3: pass 2 -> what pass 1 has for this row and the next two
+        # (always shown, so you can read along); pass 1 -> last 3 entries
+        upcoming = self._upcoming_expected(3) if self.pass_no == 2 else []
+        if upcoming:
+            row, value = upcoming[0]
+            text = f"Expect #{row}: {self._format_display(value)}"
+            cv2.putText(bar, text, (15, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1)
+            rest = "   ".join(f"#{r}: {self._format_display(val)}" for r, val in upcoming[1:])
+            if rest:
+                cv2.putText(bar, "then  " + rest, (15, 108),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 120), 1)
+        else:
+            newest = self._newest_idx()
+            step = -1 if self.pass_no == 1 else 1
+            tail = "  ".join(f"#{self._row_of(newest + step * i)}:{self._format_display(p.entries[newest + step * i])}"
+                             for i in range(min(3, n)))
+            cv2.putText(bar, tail or "(no entries yet)", (15, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
         # line 4: message / mismatch hint / key help
         if time.time() < self.message_until:
-            cv2.putText(bar, self.message, (15, 105),
+            cv2.putText(bar, self.message, (15, 138),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
         elif hint:
-            cv2.putText(bar, hint, (15, 105),
+            cv2.putText(bar, hint, (15, 138),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 128, 255), 1)
         else:
             cv2.putText(bar, "\\ add  u undo  n stack done  e export  d pass  f/t format",
-                        (15, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
+                        (15, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
 
         cv2.putText(bar, f"Zoom: {self.zoom:.1f}x", (width - 130, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
