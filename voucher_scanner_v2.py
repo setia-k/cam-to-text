@@ -17,6 +17,10 @@ changes only the workflow:
   - In pass 2 every lock is compared with pass 1 at the same row: MATCH, or
     MISMATCH with the expected number and where the card actually is in
     pass 1. It only warns; `\\` still inserts.
+  - `m` (pass 2): the locked card is one pass 1 missed. It is inserted into
+    pass 1 at its place and into pass 2 at its row, so both grow by one and
+    stay aligned. `u` in pass 2 undoes it in both. If the card is only a few
+    digits off the expected number it looks like a misread, so m asks twice.
   - `e` copies the current pass to the clipboard, one value per line —
     paste at A1 (pass 1) or B1 (pass 2). Pass 2 is padded with blank lines on
     top if unfinished so rows stay aligned. Format the column as Text.
@@ -40,6 +44,7 @@ SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session
 
 
 SESSION_VERSION = 2   # 2: pass 2 is stored in row order (see PassState)
+MISSED_MIN_DIFF = 5   # a card differing from the expected one in >= this many digits looks like a missed card, not a misread
 
 
 class PassState:
@@ -59,6 +64,8 @@ class VoucherScannerV2(VoucherScanner):
         self.stack_size = stack_size
         self.total_rows = total_rows   # pass 2 start row when pass 1 is empty (see _pass2_start)
         self.passes = {1: PassState(), 2: PassState()}
+        self.merged = set()            # cards added to pass 1 from pass 2 with `m` (see _add_missed_card)
+        self._missed_confirm_until = 0.0
         self.pass_no = 1
         self.message = ""
         self.message_until = 0.0
@@ -92,6 +99,7 @@ class VoucherScannerV2(VoucherScanner):
             self._say("Could not archive the old session - not cleared", 6)
             return
         self.passes = {1: PassState(), 2: PassState()}
+        self.merged = set()
         self.pass_no = 1
         self.history.clear()
         self.locked = False
@@ -111,6 +119,7 @@ class VoucherScannerV2(VoucherScanner):
             if data.get("version", 1) < 2:
                 self._orient_old_pass2()
             self.pass_no = int(data.get("pass_no", 1))
+            self.merged = set(data.get("merged", []))
             print(f"Loaded {os.path.basename(path)}: pass1={len(self.passes[1].entries)}, "
                   f"pass2={len(self.passes[2].entries)}")
             return True
@@ -160,7 +169,7 @@ class VoucherScannerV2(VoucherScanner):
         self._save()   # empty session.json, so the next start doesn't resume the archive
 
     def _save(self):
-        data = {"version": SESSION_VERSION, "pass_no": self.pass_no}
+        data = {"version": SESSION_VERSION, "pass_no": self.pass_no, "merged": sorted(self.merged)}
         for n, p in self.passes.items():
             data[f"pass{n}"] = {"entries": p.entries, "stack_ends": p.stack_ends}
         try:
@@ -259,7 +268,7 @@ class VoucherScannerV2(VoucherScanner):
                 self._say(f"BLOCKED: duplicate of #{row} (press u to remove the last entry if needed)")
             return
         if self.pass_no == 2 and len(self.cur.entries) >= self._pass2_start():
-            self._say(f"Pass 2 is full ({self._pass2_start()} rows)")
+            self._say(f"Pass 2 is full ({self._pass2_start()} rows) - press m if this is a missed card", 8)
             return
 
         row = self._next_row()
@@ -274,17 +283,77 @@ class VoucherScannerV2(VoucherScanner):
         else:
             self._say(f"Inserted #{row}", 2)
 
+    @staticmethod
+    def _digit_diff(a, b):
+        return sum(x != y for x, y in zip(a, b)) + abs(len(a) - len(b))
+
+    def _add_missed_card(self):
+        """Pass 2, key m: the locked card is one pass 1 missed (e.g. two stuck
+        together). It goes into pass 1 at the place it sits in the stack and
+        into pass 2 at its row, so both lists grow by one and everything after
+        stays aligned. Undo (u, in pass 2) reverses both."""
+        if self.pass_no != 2:
+            self._say("m only works in pass 2 (adds a card pass 1 missed)")
+            return
+        if not self.locked or not self.locked_value:
+            return
+        v = self.locked_value
+        p1, p2 = self.passes[1], self.passes[2]
+        if not p1.entries:
+            self._say("Pass 1 is empty - nothing to add a missed card to")
+            return
+        if v in p2.entries:
+            self._say(f"Already in pass 2 as #{self._row_of(p2.entries.index(v))}")
+            return
+        if v in p1.entries:
+            self._say(f"Already in pass 1 (#{p1.entries.index(v) + 1}) - press backslash to insert it normally")
+            return
+
+        idx = max(0, min(self._next_row(), len(p1.entries)))   # pass 1 index == row it takes - 1
+        expected = p1.entries[idx - 1] if 1 <= idx <= len(p1.entries) else None
+        if expected is not None:
+            diff = self._digit_diff(v, expected)
+            if diff < MISSED_MIN_DIFF and time.time() >= self._missed_confirm_until:
+                self._missed_confirm_until = time.time() + 6
+                self._say(f"Only {diff} digit(s) differ from the expected number - looks like a misread, "
+                          f"not a missed card. Press m again to add it anyway", 6)
+                return
+        self._missed_confirm_until = 0.0
+
+        p1.entries.insert(idx, v)
+        p1.stack_ends = [e + 1 if e > idx else e for e in p1.stack_ends]   # that stack gained a card
+        p2.entries.insert(0, v)
+        self.merged.add(v)
+        self._save()
+        self._say(f"Missed card added: pass 1 #{idx + 1}, pass 2 #{self._row_of(0)}. "
+                  f"Both passes now have {len(p1.entries)} rows", 8)
+
     def _undo(self):
         p = self.cur
         if not p.entries:
             self._say("Nothing to undo")
             return
+        newest = p.entries[self._newest_idx()]
+        if self.pass_no == 1 and newest in self.merged:
+            self._say("That card was added from pass 2 with m - undo it in pass 2", 6)
+            return
         row = self._row_of(self._newest_idx())
         removed = p.entries.pop() if self.pass_no == 1 else p.entries.pop(0)
         while p.stack_ends and p.stack_ends[-1] > len(p.entries):
             p.stack_ends.pop()   # undo crossed back over a closed stack
+
+        note = ""
+        if self.pass_no == 2 and removed in self.merged:
+            # it was a missed card: take it back out of pass 1 too
+            p1 = self.passes[1]
+            if removed in p1.entries:
+                at = p1.entries.index(removed)
+                p1.entries.pop(at)
+                p1.stack_ends = [e - 1 if e > at + 1 else e for e in p1.stack_ends]
+            self.merged.discard(removed)
+            note = " (missed card - also removed from pass 1)"
         self._save()
-        self._say(f"Removed #{row}: {self._format_display(removed)}")
+        self._say(f"Removed #{row}: {self._format_display(removed)}{note}")
 
     def _close_stack(self):
         p = self.cur
@@ -335,6 +404,9 @@ class VoucherScannerV2(VoucherScanner):
             if key == ord('n'):
                 self._close_stack()
                 return True
+            if key == ord('m'):
+                self._add_missed_card()
+                return True
             if key == ord('d'):
                 self._switch_pass()
                 return True
@@ -372,13 +444,21 @@ class VoucherScannerV2(VoucherScanner):
                 check = self._check_vs_pass1(self.locked_value)
                 if check is None:
                     text, color = f"LOCKED #{row}: {shown}", (0, 200, 0)
+                    if (self.pass_no == 2 and self.passes[1].entries
+                            and self.locked_value not in self.passes[1].entries):
+                        hint = "Not in pass 1 - missed card? press m to add it"
                 elif check[0]:
                     text, color = f"LOCKED #{row}: {shown}  MATCH", (0, 200, 0)
                 else:
                     text, color = f"MISMATCH #{row}: {shown}", (0, 128, 255)
-                    where = (f"this card is pass 1 #{check[2]}" if check[2]
-                             else "this card is not in pass 1")
-                    hint = where.capitalize()
+                    if check[2]:
+                        hint = f"This card is pass 1 #{check[2]}"
+                    else:
+                        diff = self._digit_diff(self.locked_value, check[1])
+                        if diff >= MISSED_MIN_DIFF:
+                            hint = "Not in pass 1 - looks like a MISSED card: press m to add it here"
+                        else:
+                            hint = f"Not in pass 1, only {diff} digit(s) differ from expected - misread? rescan"
             elif idx == self._newest_idx():
                 text, color = f"#{self._row_of(idx)} inserted - next card", (200, 200, 0)
             else:
@@ -423,7 +503,7 @@ class VoucherScannerV2(VoucherScanner):
             cv2.putText(bar, hint, (15, 138),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 128, 255), 1)
         else:
-            cv2.putText(bar, "\\ add  u undo  n stack done  e export  d pass  f/t format",
+            cv2.putText(bar, "\\ add  u undo  m missed card  n stack done  e export  d pass  f/t format",
                         (15, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
 
         cv2.putText(bar, f"Zoom: {self.zoom:.1f}x", (width - 130, 25),
@@ -455,7 +535,7 @@ class VoucherScannerV2(VoucherScanner):
         cv2.imshow("OCR Input (what the engine sees)", cv2.vconcat([img, strip]))
 
     def _print_controls(self):
-        print("v2 controls: [\\] add to list (global)  |  [u] undo last  |  [n] stack done  |  [N,N] new session  |  "
+        print("v2 controls: [\\] add to list (global)  |  [u] undo last  |  [n] stack done  |  [m] add missed card (pass 2)  |  [N,N] new session  |  "
               "[e] export to clipboard  |  [d] switch pass 1/2  |  [f] cycle format  |  "
               "[t] type format  |  [p] pause OCR  |  [ / ] min confidence  |  [i] idle skip  |  "
               "[r] rotate  |  [+/-] zoom  |  [q] quit")

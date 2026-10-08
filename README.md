@@ -78,6 +78,7 @@ Virtual Camera usually isn't index 0 if you have a laptop webcam too.
 |---|---|
 | `\` | Add locked value to the list (blocked if already in this pass) |
 | `u` | Undo last entry (then it can be rescanned) |
+| `m` | Pass 2 only: the locked card is one pass 1 missed. Inserts it into pass 1 at its place and into pass 2 at its row so both stay aligned. `u` in pass 2 undoes it in both. Asks twice if it looks like a misread (few digits off) |
 | `n` | Close a stack; warns if the count isn't 25 |
 | `d` | Switch pass 1 / pass 2. Pass 2 counts down from row 100 and each lock is compared with pass 1 at that row (MATCH / MISMATCH warning, never blocks) |
 | `e` | Copy the pass to the clipboard, one per line — paste at A1 (pass 1) or B1 (pass 2; padded with blank rows on top if unfinished) |
