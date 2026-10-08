@@ -57,7 +57,7 @@ class VoucherScannerV2(VoucherScanner):
         kwargs.setdefault("info_bar_height", 150)
         super().__init__(*args, **kwargs)
         self.stack_size = stack_size
-        self.total_rows = total_rows   # pass 2 starts at this row and counts down
+        self.total_rows = total_rows   # pass 2 start row when pass 1 is empty (see _pass2_start)
         self.passes = {1: PassState(), 2: PassState()}
         self.pass_no = 1
         self.message = ""
@@ -124,7 +124,7 @@ class VoucherScannerV2(VoucherScanner):
         lines up with pass 1 at the rows pass 2 would occupy; if equal, assume
         scan order and reverse."""
         p1, e2 = self.passes[1].entries, self.passes[2].entries
-        first_row = self.total_rows - len(e2) + 1
+        first_row = self._pass2_start() - len(e2) + 1
 
         def matches(order):
             return sum(1 for i, val in enumerate(order)
@@ -176,17 +176,24 @@ class VoucherScannerV2(VoucherScanner):
         self.message_until = time.time() + seconds
 
     # ---- rows -------------------------------------------------------
+    def _pass2_start(self):
+        """Row pass 2 starts at and counts down from: the number of cards pass 1
+        actually has (98 if two were missed), not a fixed 100, so the first
+        card scanned in pass 2 lines up with the last row of pass 1."""
+        n = len(self.passes[1].entries)
+        return n if n > 0 else self.total_rows
+
     def _row_of(self, idx):
         """Excel row of entries[idx] in the current pass."""
         if self.pass_no == 1:
             return idx + 1
-        return self.total_rows - len(self.cur.entries) + 1 + idx
+        return self._pass2_start() - len(self.cur.entries) + 1 + idx
 
     def _next_row(self):
         """Row the next insert in the current pass would take."""
         if self.pass_no == 1:
             return len(self.cur.entries) + 1
-        return self.total_rows - len(self.cur.entries)
+        return self._pass2_start() - len(self.cur.entries)
 
     def _newest_idx(self):
         return len(self.cur.entries) - 1 if self.pass_no == 1 else 0
@@ -251,8 +258,8 @@ class VoucherScannerV2(VoucherScanner):
             else:
                 self._say(f"BLOCKED: duplicate of #{row} (press u to remove the last entry if needed)")
             return
-        if self.pass_no == 2 and len(self.cur.entries) >= self.total_rows:
-            self._say(f"Pass 2 is full ({self.total_rows} rows)")
+        if self.pass_no == 2 and len(self.cur.entries) >= self._pass2_start():
+            self._say(f"Pass 2 is full ({self._pass2_start()} rows)")
             return
 
         row = self._next_row()
@@ -301,7 +308,7 @@ class VoucherScannerV2(VoucherScanner):
             # entries are already in row order; blank lines up top keep each
             # value on its own row when pasted at the top of the column, even
             # if pass 2 isn't finished yet
-            pad = max(0, self.total_rows - len(values))
+            pad = max(0, self._pass2_start() - len(values))
             values = [""] * pad + values
         pyperclip.copy("\n".join(values))
         target = "paste at B1" if self.pass_no == 2 else "paste at A1"
