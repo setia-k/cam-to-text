@@ -22,7 +22,7 @@ from ocr_base import OCREngine
 
 
 class PaddleEngine(OCREngine):
-    def __init__(self, model_name="PP-OCRv6_small_rec", denoise_strength=10):
+    def __init__(self, model_name="PP-OCRv6_medium_rec", denoise_strength=10):
         # Loaded once here, not per-frame — model loading is slow (~seconds),
         # inference on each frame is fast.
         self._model = TextRecognition(model_name=model_name)
